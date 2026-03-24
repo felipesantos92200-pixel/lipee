@@ -62,23 +62,21 @@ exports.handler = async (event) => {
     const taxaPlataforma = 0.10;
     const valorTaxa = Number((valorBruto * taxaPlataforma).toFixed(2));
     const valorLiquido = Number((valorBruto - valorTaxa).toFixed(2));
-
-    // 5. Preparação e Envio para a EvoPay
+// 5. Preparação e Envio para a EvoPay
     const evopayToken = process.env.EVOPAY_TOKEN ? process.env.EVOPAY_TOKEN.trim() : '';
     
-    // ==========================================
-    // INÍCIO DO DEBUG DE AUTENTICAÇÃO
-    // ==========================================
-    console.log('--- DIAGNÓSTICO DO TOKEN EVOPAY ---');
-    console.log(`1. Status do Token no Servidor: ${evopayToken ? 'ENCONTRADO' : 'VAZIO / NÃO ENCONTRADO'}`);
-    console.log(`2. Tamanho do Token: ${evopayToken.length} caracteres`);
-    if (evopayToken.length > 0) {
-      console.log(`3. O Token começa com: ${evopayToken.substring(0, 5)}...`);
-    } else {
-      console.error('ERRO CRÍTICO: A variável EVOPAY_TOKEN não está configurada no painel de hospedagem!');
+    console.log('--- TESTE DE CONEXÃO ---');
+    
+    try {
+      // TESTE 1: Tentar ler o saldo para validar o Token
+      const checkAuth = await axios.get('https://api.evopay.cash/v1/balance', {
+        headers: { 'API-Key': evopayToken }
+      });
+      console.log('✅ Token Validado! Conexão com EvoPay OK. Saldo atual:', checkAuth.data);
+    } catch (authError) {
+      console.error('❌ Erro de Autenticação no Saldo:', authError.response?.data || authError.message);
+      throw new Error('O Token fornecido foi recusado pela EvoPay mesmo na consulta de saldo. Verifique se o Token no painel mudou.');
     }
-    console.log('-----------------------------------');
-    // ==========================================
 
     const payloadEvoPay = {
       amount: valorLiquido,
@@ -87,15 +85,18 @@ exports.handler = async (event) => {
       description: `Saque Monety - ID ${withdrawId}`
     };
 
-    console.log('Enviando para EvoPay:', payloadEvoPay);
-
-    const configRequest = {
+    // TESTE 2: Tentar o saque com o endpoint alternativo (payout) se o withdraw falhar
+    console.log('Tentando processar saque...');
+    
+    // Tente mudar 'withdraw' para 'payout' na linha abaixo se o erro persistir
+    const endpointSaque = 'https://api.evopay.cash/v1/payout'; // Alterado de withdraw para payout para testar
+    
+    const evopayResponse = await axios.post(endpointSaque, payloadEvoPay, {
       headers: { 
         'API-Key': evopayToken,
         'Content-Type': 'application/json'
       }
-    };
-
+    });
     console.log('Headers configurados (Oculto por segurança):', { ...configRequest.headers, 'API-Key': '***' });
 
     // Tentativa de envio
