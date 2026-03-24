@@ -57,15 +57,16 @@ exports.handler = async (event) => {
 
     const evopayToken = process.env.EVOPAY_TOKEN ? process.env.EVOPAY_TOKEN.trim() : '';
 
-    console.log('--- TESTE DE CONEXÃO ---');
+    console.log('--- TESTE DE CONEXÃO EVOPAY ---');
     try {
-      // Tenta consultar o saldo antes de tudo para validar se o TOKEN funciona
-      const checkAuth = await axios.get('https://api.evopay.cash/v1/balance', {
+      // AJUSTE: Nova URL e caminho para consulta de saldo baseada na documentação
+      const checkAuth = await axios.get('https://pix.evopay.cash/v1/account/balance', {
         headers: { 'API-Key': evopayToken }
       });
-      console.log('✅ Conexão OK! Saldo disponível:', checkAuth.data);
+      // AJUSTE: O retorno da API coloca o valor dentro de "balance"
+      console.log(`✅ Conexão OK! Saldo disponível: R$ ${checkAuth.data.balance}`);
     } catch (authErr) {
-      console.error('❌ O Token foi RECUSADO na consulta de saldo (401).');
+      console.error('❌ O Token foi RECUSADO na consulta de saldo (401) ou a rota está incorreta.', authErr.response?.data || authErr.message);
       throw new Error('Token EvoPay inválido ou sem permissão de consulta.');
     }
 
@@ -76,9 +77,12 @@ exports.handler = async (event) => {
       description: `Saque Monety - ID ${withdrawId}`
     };
 
-    // TENTATIVA DE SAQUE (Alterado para /payout para teste)
-    console.log('Enviando pedido de saque para /payout...');
-    const evopayResponse = await axios.post('https://api.evopay.cash/v1/payout', payloadEvoPay, {
+    // TENTATIVA DE SAQUE
+    console.log('Enviando pedido de saque...');
+    
+    // AJUSTE: Domínio atualizado para pix.evopay.cash. 
+    // ATENÇÃO: Confirme se o endpoint de POST é realmente /v1/payout ou se mudou na documentação deles.
+    const evopayResponse = await axios.post('https://pix.evopay.cash/v1/payout', payloadEvoPay, {
       headers: { 
         'API-Key': evopayToken,
         'Content-Type': 'application/json'
