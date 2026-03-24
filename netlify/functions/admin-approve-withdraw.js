@@ -8,7 +8,6 @@ if (!admin.apps.length) {
       credential: admin.credential.cert({
         projectId: process.env.FIREBASE_PROJECT_ID,
         clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        // O replace garante que as quebras de linha da chave privada sejam lidas corretamente
         privateKey: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined
       })
     });
@@ -20,7 +19,6 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 
 exports.handler = async (event) => {
-  // Headers CORS padrão
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
@@ -45,7 +43,7 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers, body: JSON.stringify({ error: 'ID de usuário ou saque ausente.' }) };
     }
 
-    // 3. Busca o documento de saque no banco de dados
+    // 3. Busca o documento de saque
     const withdrawalRef = db.collection('users').doc(userId).collection('withdrawals').doc(withdrawId);
     const withdrawalDoc = await withdrawalRef.get();
 
@@ -59,16 +57,29 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers, body: JSON.stringify({ error: 'Este saque já foi processado anteriormente.' }) };
     }
 
-    // 4. Cálculo de Taxas (10% de desconto)
+    // 4. Cálculo de Taxas
     const valorBruto = parseFloat(withdrawalData.amount);
-    const taxaPlataforma = 0.10; // 10%
+    const taxaPlataforma = 0.10;
     const valorTaxa = Number((valorBruto * taxaPlataforma).toFixed(2));
     const valorLiquido = Number((valorBruto - valorTaxa).toFixed(2));
 
     // 5. Preparação e Envio para a EvoPay
-    // CORREÇÃO CRÍTICA: O .trim() remove espaços vazios invisíveis que causam o erro 401
     const evopayToken = process.env.EVOPAY_TOKEN ? process.env.EVOPAY_TOKEN.trim() : '';
     
+    // ==========================================
+    // INÍCIO DO DEBUG DE AUTENTICAÇÃO
+    // ==========================================
+    console.log('--- DIAGNÓSTICO DO TOKEN EVOPAY ---');
+    console.log(`1. Status do Token no Servidor: ${evopayToken ? 'ENCONTRADO' : 'VAZIO / NÃO ENCONTRADO'}`);
+    console.log(`2. Tamanho do Token: ${evopayToken.length} caracteres`);
+    if (evopayToken.length > 0) {
+      console.log(`3. O Token começa com: ${evopayToken.substring(0, 5)}...`);
+    } else {
+      console.error('ERRO CRÍTICO: A variável EVOPAY_TOKEN não está configurada no painel de hospedagem!');
+    }
+    console.log('-----------------------------------');
+    // ==========================================
+
     const payloadEvoPay = {
       amount: valorLiquido,
       pixKey: withdrawalData.pixKey,
@@ -78,13 +89,17 @@ exports.handler = async (event) => {
 
     console.log('Enviando para EvoPay:', payloadEvoPay);
 
-    // CORREÇÃO CRÍTICA: URL alterada para api.evopay.cash (conforme documentação)
-    const evopayResponse = await axios.post('https://api.evopay.cash/v1/withdraw', payloadEvoPay, {
+    const configRequest = {
       headers: { 
         'API-Key': evopayToken,
         'Content-Type': 'application/json'
       }
-    });
+    };
+
+    console.log('Headers configurados (Oculto por segurança):', { ...configRequest.headers, 'API-Key': '***' });
+
+    // Tentativa de envio
+    const evopayResponse = await axios.post('https://api.evopay.cash/v1/withdraw', payloadEvoPay, configRequest);
 
     const gatewayId = evopayResponse.data?.id || evopayResponse.data?.transactionId || 'N/A';
 
@@ -123,14 +138,16 @@ exports.handler = async (event) => {
     };
 
   } catch (error) {
-    console.error('ERRO CRÍTICO NA FUNÇÃO:');
+    console.error('--- ERRO CRÍTICO NA REQUISIÇÃO EVOPAY ---');
     const errorMsg = error.response?.data?.message || error.message;
-    console.error(errorMsg);
+    console.error('Mensagem:', errorMsg);
 
     if (error.response) {
-      console.error('Dados do Erro EvoPay:', JSON.stringify(error.response.data));
-      console.error('Status do Erro EvoPay:', error.response.status);
+      console.error('Status HTTP:', error.response.status);
+      console.error('Dados completos do Erro EvoPay:', JSON.stringify(error.response.data));
+      console.error('URL tentada:', error.response.config?.url);
     }
+    console.error('------------------------------------------');
 
     return {
       statusCode: error.response?.status || 500,
