@@ -1,7 +1,6 @@
 const admin = require('firebase-admin');
 const axios = require('axios');
 
-// 1. Inicialização Segura do Firebase Admin
 if (!admin.apps.length) {
   try {
     admin.initializeApp({
@@ -29,7 +28,6 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers, body: '' };
 
   try {
-    // 2. Autenticação de Segurança (Token do Admin)
     const authHeader = event.headers.authorization || event.headers.Authorization;
     const expectedToken = process.env.ADMIN_SECRET_TOKEN;
 
@@ -39,11 +37,6 @@ exports.handler = async (event) => {
 
     const { userId, withdrawId } = JSON.parse(event.body);
 
-    if (!userId || !withdrawId) {
-      return { statusCode: 400, headers, body: JSON.stringify({ error: 'ID de usuário ou saque ausente.' }) };
-    }
-
-    // 3. Busca o documento de saque
     const withdrawalRef = db.collection('users').doc(userId).collection('withdrawals').doc(withdrawId);
     const withdrawalDoc = await withdrawalRef.get();
 
@@ -52,30 +45,28 @@ exports.handler = async (event) => {
     }
 
     const withdrawalData = withdrawalDoc.data();
-
     if (withdrawalData.status !== 'processing' && withdrawalData.status !== 'pending') {
-      return { statusCode: 400, headers, body: JSON.stringify({ error: 'Este saque já foi processado anteriormente.' }) };
+      return { statusCode: 400, headers, body: JSON.stringify({ error: 'Este saque já foi processado.' }) };
     }
 
-    // 4. Cálculo de Taxas
+    // Cálculo
     const valorBruto = parseFloat(withdrawalData.amount);
     const taxaPlataforma = 0.10;
     const valorTaxa = Number((valorBruto * taxaPlataforma).toFixed(2));
     const valorLiquido = Number((valorBruto - valorTaxa).toFixed(2));
-// 5. Preparação e Envio para a EvoPay
+
     const evopayToken = process.env.EVOPAY_TOKEN ? process.env.EVOPAY_TOKEN.trim() : '';
-    
+
     console.log('--- TESTE DE CONEXÃO ---');
-    
     try {
-      // TESTE 1: Tentar ler o saldo para validar o Token
+      // Tenta consultar o saldo antes de tudo para validar se o TOKEN funciona
       const checkAuth = await axios.get('https://api.evopay.cash/v1/balance', {
         headers: { 'API-Key': evopayToken }
       });
-      console.log('✅ Token Validado! Conexão com EvoPay OK. Saldo atual:', checkAuth.data);
-    } catch (authError) {
-      console.error('❌ Erro de Autenticação no Saldo:', authError.response?.data || authError.message);
-      throw new Error('O Token fornecido foi recusado pela EvoPay mesmo na consulta de saldo. Verifique se o Token no painel mudou.');
+      console.log('✅ Conexão OK! Saldo disponível:', checkAuth.data);
+    } catch (authErr) {
+      console.error('❌ O Token foi RECUSADO na consulta de saldo (401).');
+      throw new Error('Token EvoPay inválido ou sem permissão de consulta.');
     }
 
     const payloadEvoPay = {
@@ -85,28 +76,19 @@ exports.handler = async (event) => {
       description: `Saque Monety - ID ${withdrawId}`
     };
 
-    // TESTE 2: Tentar o saque com o endpoint alternativo (payout) se o withdraw falhar
-    console.log('Tentando processar saque...');
-    
-    // Tente mudar 'withdraw' para 'payout' na linha abaixo se o erro persistir
-    const endpointSaque = 'https://api.evopay.cash/v1/payout'; // Alterado de withdraw para payout para testar
-    
-    const evopayResponse = await axios.post(endpointSaque, payloadEvoPay, {
+    // TENTATIVA DE SAQUE (Alterado para /payout para teste)
+    console.log('Enviando pedido de saque para /payout...');
+    const evopayResponse = await axios.post('https://api.evopay.cash/v1/payout', payloadEvoPay, {
       headers: { 
         'API-Key': evopayToken,
         'Content-Type': 'application/json'
       }
     });
-    console.log('Headers configurados (Oculto por segurança):', { ...configRequest.headers, 'API-Key': '***' });
-
-    // Tentativa de envio
-    const evopayResponse = await axios.post('https://api.evopay.cash/v1/withdraw', payloadEvoPay, configRequest);
 
     const gatewayId = evopayResponse.data?.id || evopayResponse.data?.transactionId || 'N/A';
 
-    // 6. Atualização no Firestore (Sucesso)
+    // Sucesso no Banco de Dados
     const batch = db.batch();
-
     batch.update(withdrawalRef, {
       status: 'completed',
       gatewayTransactionId: gatewayId,
@@ -122,7 +104,7 @@ exports.handler = async (event) => {
       netAmount: valorLiquido,
       fee: valorTaxa,
       status: 'completed',
-      description: `Saque PIX Aprovado (-10% taxa)`,
+      description: `Saque PIX Aprovado`,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
@@ -131,33 +113,21 @@ exports.handler = async (event) => {
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify({ 
-        success: true, 
-        message: 'Saque aprovado e enviado!', 
-        enviado: valorLiquido 
-      })
+      body: JSON.stringify({ success: true, message: 'Saque enviado!', enviado: valorLiquido })
     };
 
   } catch (error) {
-    console.error('--- ERRO CRÍTICO NA REQUISIÇÃO EVOPAY ---');
-    const errorMsg = error.response?.data?.message || error.message;
-    console.error('Mensagem:', errorMsg);
-
-    if (error.response) {
-      console.error('Status HTTP:', error.response.status);
-      console.error('Dados completos do Erro EvoPay:', JSON.stringify(error.response.data));
-      console.error('URL tentada:', error.response.config?.url);
-    }
-    console.error('------------------------------------------');
+    console.error('--- ERRO NO PROCESSO ---');
+    const status = error.response?.status || 500;
+    const msg = error.response?.data?.message || error.message;
+    
+    console.error(`Status: ${status}`);
+    console.error(`Detalhes: ${JSON.stringify(error.response?.data || msg)}`);
 
     return {
-      statusCode: error.response?.status || 500,
+      statusCode: status,
       headers,
-      body: JSON.stringify({ 
-        success: false, 
-        error: errorMsg,
-        details: error.response?.data || null
-      })
+      body: JSON.stringify({ success: false, error: msg })
     };
   }
 };
