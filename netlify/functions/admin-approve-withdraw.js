@@ -1,7 +1,6 @@
 const admin = require('firebase-admin');
 const axios = require('axios');
 
-// Inicialização segura do Firebase via variáveis de ambiente
 if (!admin.apps.length) {
   try {
     admin.initializeApp({
@@ -46,44 +45,28 @@ exports.handler = async (event) => {
     }
 
     const withdrawalData = withdrawalDoc.data();
-    if (withdrawalData.status !== 'processing' && withdrawalData.status !== 'pending') {
-      return { statusCode: 400, headers, body: JSON.stringify({ error: 'Este saque já foi processado.' }) };
-    }
-
+    
     // Cálculo de valores
     const valorBruto = parseFloat(withdrawalData.amount);
     const taxaPlataforma = 0.10;
-    const valorTaxa = Number((valorBruto * taxaPlataforma).toFixed(2));
-    const valorLiquido = Number((valorBruto - valorTaxa).toFixed(2));
+    const valorLiquido = Number((valorBruto * 0.90).toFixed(2)); // Garante 2 casas decimais
 
     const evopayToken = process.env.EVOPAY_TOKEN ? process.env.EVOPAY_TOKEN.trim() : '';
 
-    // 1. Verificação de Saldo (Sempre bom garantir)
-    console.log('--- VALIDANDO SALDO ANTES DO SAQUE ---');
-    const checkBalance = await axios.get('https://pix.evopay.cash/v1/account/balance', {
-      headers: { 'API-Key': evopayToken }
-    });
-    
-    if (checkBalance.data.balance < valorLiquido) {
-      return { 
-        statusCode: 400, 
-        headers, 
-        body: JSON.stringify({ error: `Saldo insuficiente na EvoPay. Saldo: ${checkBalance.data.balance}` }) 
-      };
-    }
-
-    // 2. Payload de Saque
+    // 1. Payload Ajustado
+    // Adicionei 'pixKeyType' e 'keyType' pois algumas APIs da EvoPay exigem um desses nomes
     const payloadEvoPay = {
       amount: valorLiquido,
       pixKey: withdrawalData.pixKey,
-      pixType: withdrawalData.pixType || 'cpf', // Se der erro 400, tente mudar para 'pixKeyType'
-      description: `Saque ID ${withdrawId}`
+      pixType: withdrawalData.pixType || 'cpf',
+      pixKeyType: withdrawalData.pixType || 'cpf', // Campo extra por segurança
+      description: `Saque ${withdrawId}`
     };
 
-    console.log('Tentando rota de saque: https://pix.evopay.cash/v1/withdraw');
+    // 2. TESTE NA SEGUNDA URL SUGERIDA
+    console.log(`Tentando Saque (R$ ${valorLiquido}) em: https://api.evopay.cash/v1/withdraw`);
 
-    // TENTATIVA: Usando a primeira URL sugerida
-    const evopayResponse = await axios.post('https://pix.evopay.cash/v1/withdraw', payloadEvoPay, {
+    const evopayResponse = await axios.post('https://api.evopay.cash/v1/withdraw', payloadEvoPay, {
       headers: { 
         'API-Key': evopayToken,
         'Content-Type': 'application/json'
@@ -98,7 +81,6 @@ exports.handler = async (event) => {
       status: 'completed',
       gatewayTransactionId: gatewayId,
       netAmount: valorLiquido,
-      fee: valorTaxa,
       approvedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
@@ -106,10 +88,7 @@ exports.handler = async (event) => {
     batch.set(transactionRef, {
       type: 'withdrawal',
       amount: valorBruto,
-      netAmount: valorLiquido,
-      fee: valorTaxa,
       status: 'completed',
-      description: `Saque PIX Enviado`,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
@@ -118,21 +97,24 @@ exports.handler = async (event) => {
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify({ success: true, message: 'Saque processado!', id: gatewayId })
+      body: JSON.stringify({ success: true, message: 'Saque Realizado!', id: gatewayId })
     };
 
   } catch (error) {
     console.error('--- ERRO NA OPERAÇÃO ---');
     const status = error.response?.status || 500;
-    const errorMsg = error.response?.data?.message || error.response?.data?.error || error.message;
+    const errorData = error.response?.data || {};
     
     console.error(`Status: ${status}`);
-    console.error(`Detalhes: ${JSON.stringify(error.response?.data || errorMsg)}`);
+    console.error(`Detalhes da EvoPay: ${JSON.stringify(errorData)}`);
 
     return {
       statusCode: status,
       headers,
-      body: JSON.stringify({ success: false, error: errorMsg })
+      body: JSON.stringify({ 
+        success: false, 
+        error: errorData.message || "Erro na comunicação com o banco." 
+      })
     };
   }
 };
