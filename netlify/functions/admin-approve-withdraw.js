@@ -1,6 +1,7 @@
 const admin = require('firebase-admin');
 const axios = require('axios');
 
+// 1. Inicialização do Firebase (Segura, via Variáveis de Ambiente)
 if (!admin.apps.length) {
   try {
     admin.initializeApp({
@@ -18,6 +19,7 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 
 exports.handler = async (event) => {
+  // Configuração de Headers para permitir chamadas do seu Front-end (CORS)
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
@@ -28,6 +30,7 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers, body: '' };
 
   try {
+    // 2. Verificação de Segurança (Admin Token)
     const authHeader = event.headers.authorization || event.headers.Authorization;
     const expectedToken = process.env.ADMIN_SECRET_TOKEN;
 
@@ -37,6 +40,7 @@ exports.handler = async (event) => {
 
     const { userId, withdrawId } = JSON.parse(event.body);
 
+    // 3. Busca os dados do saque no Firestore
     const withdrawalRef = db.collection('users').doc(userId).collection('withdrawals').doc(withdrawId);
     const withdrawalDoc = await withdrawalRef.get();
 
@@ -46,49 +50,79 @@ exports.handler = async (event) => {
 
     const withdrawalData = withdrawalDoc.data();
     
-    // Cálculo de valores
+    // Evita processar o mesmo saque duas vezes
+    if (withdrawalData.status !== 'processing' && withdrawalData.status !== 'pending') {
+      return { statusCode: 400, headers, body: JSON.stringify({ error: 'Este saque já foi processado.' }) };
+    }
+
+    // 4. Cálculo de Valores (Taxa de 10% da plataforma)
     const valorBruto = parseFloat(withdrawalData.amount);
     const taxaPlataforma = 0.10;
-    const valorLiquido = Number((valorBruto * 0.90).toFixed(2)); // Garante 2 casas decimais
+    const valorTaxa = Number((valorBruto * taxaPlataforma).toFixed(2));
+    const valorLiquido = Number((valorBruto - valorTaxa).toFixed(2));
 
     const evopayToken = process.env.EVOPAY_TOKEN ? process.env.EVOPAY_TOKEN.trim() : '';
 
-    // 1. Payload Ajustado
-    // Adicionei 'pixKeyType' e 'keyType' pois algumas APIs da EvoPay exigem um desses nomes
+    // 5. Verificação de Saldo na EvoPay (Obrigatório para evitar erros de gateway)
+    console.log('--- VERIFICANDO SALDO NA EVOPAY ---');
+    const checkBalance = await axios.get('https://pix.evopay.cash/v1/account/balance', {
+      headers: { 'API-Key': evopayToken }
+    });
+    
+    const saldoDisponivel = checkBalance.data.balance;
+    console.log(`Saldo atual: R$ ${saldoDisponivel}`);
+
+    if (saldoDisponivel < valorLiquido) {
+      return { 
+        statusCode: 400, 
+        headers, 
+        body: JSON.stringify({ error: `Saldo insuficiente na EvoPay (R$ ${saldoDisponivel}).` }) 
+      };
+    }
+
+    // 6. Execução do Saque (Cash-out)
     const payloadEvoPay = {
       amount: valorLiquido,
       pixKey: withdrawalData.pixKey,
-      pixType: withdrawalData.pixType || 'cpf',
-      pixKeyType: withdrawalData.pixType || 'cpf', // Campo extra por segurança
-      description: `Saque ${withdrawId}`
+      pixType: withdrawalData.pixType || 'cpf', // CPF, EMAIL, PHONE ou RANDOM
+      description: `Saque Monety ID:${withdrawId}`
     };
 
-    // 2. TESTE NA SEGUNDA URL SUGERIDA
-    console.log(`Tentando Saque (R$ ${valorLiquido}) em: https://api.evopay.cash/v1/withdraw`);
+    console.log(`Enviando R$ ${valorLiquido} para chave ${withdrawalData.pixKey}...`);
 
-    const evopayResponse = await axios.post('https://api.evopay.cash/v1/withdraw', payloadEvoPay, {
+    // ROTA VALIDADA: pix.evopay.cash/v1/withdraw
+    const evopayResponse = await axios.post('https://pix.evopay.cash/v1/withdraw', payloadEvoPay, {
       headers: { 
         'API-Key': evopayToken,
         'Content-Type': 'application/json'
       }
     });
 
+    // Pega o ID da transação gerado pela EvoPay
     const gatewayId = evopayResponse.data?.id || evopayResponse.data?.transactionId || 'N/A';
 
-    // 3. Sucesso: Atualiza Firebase
+    // 7. Atualização Atômica no Firebase (Batch)
     const batch = db.batch();
+    
+    // Atualiza o documento do saque
     batch.update(withdrawalRef, {
       status: 'completed',
       gatewayTransactionId: gatewayId,
       netAmount: valorLiquido,
+      fee: valorTaxa,
       approvedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
+    // Cria o registro na coleção geral de transações
     const transactionRef = db.collection('users').doc(userId).collection('transactions').doc();
     batch.set(transactionRef, {
       type: 'withdrawal',
       amount: valorBruto,
+      netAmount: valorLiquido,
+      fee: valorTaxa,
       status: 'completed',
+      gatewayId: gatewayId,
+      description: `Saque PIX Enviado`,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
@@ -97,23 +131,24 @@ exports.handler = async (event) => {
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify({ success: true, message: 'Saque Realizado!', id: gatewayId })
+      body: JSON.stringify({ success: true, message: 'Saque concluído com sucesso!', id: gatewayId })
     };
 
   } catch (error) {
-    console.error('--- ERRO NA OPERAÇÃO ---');
+    console.error('--- ERRO CRÍTICO NO PROCESSO ---');
     const status = error.response?.status || 500;
     const errorData = error.response?.data || {};
     
-    console.error(`Status: ${status}`);
-    console.error(`Detalhes da EvoPay: ${JSON.stringify(errorData)}`);
+    // Log detalhado para o console do seu servidor
+    console.error(`Status HTTP: ${status}`);
+    console.error(`Resposta da API: ${JSON.stringify(errorData)}`);
 
     return {
       statusCode: status,
       headers,
       body: JSON.stringify({ 
         success: false, 
-        error: errorData.message || "Erro na comunicação com o banco." 
+        error: errorData.message || "Erro no servidor da EvoPay ou dados inválidos." 
       })
     };
   }
