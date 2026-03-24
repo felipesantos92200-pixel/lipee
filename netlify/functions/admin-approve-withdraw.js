@@ -1,15 +1,26 @@
 const admin = require('firebase-admin');
 const axios = require('axios');
 
-// Inicialização do Firebase Admin
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
+// Inicialização segura do Firebase Admin
+try {
+  if (!admin.apps.length) {
+    const serviceAccount = {
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined
-    })
-  });
+      // Corrige quebras de linha na chave privada
+      privateKey: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
+    };
+
+    if (!serviceAccount.projectId) console.error("❌ ERRO: FIREBASE_PROJECT_ID não encontrado!");
+    if (!serviceAccount.clientEmail) console.error("❌ ERRO: FIREBASE_CLIENT_EMAIL não encontrado!");
+    if (!serviceAccount.privateKey) console.error("❌ ERRO: FIREBASE_PRIVATE_KEY não encontrada!");
+
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+  }
+} catch (e) {
+  console.error("Falha crítica na inicialização do Firebase:", e.message);
 }
 
 const db = admin.firestore();
@@ -30,7 +41,7 @@ exports.handler = async (event) => {
     const expectedToken = process.env.ADMIN_SECRET_TOKEN;
 
     if (!authHeader || authHeader !== `Bearer ${expectedToken}`) {
-      return { statusCode: 401, headers, body: JSON.stringify({ error: 'Não autorizado.' }) };
+      return { statusCode: 401, headers, body: JSON.stringify({ error: 'Não autorizado. Verifique o Token de Admin.' }) };
     }
 
     const { userId, withdrawId } = JSON.parse(event.body);
@@ -61,7 +72,8 @@ exports.handler = async (event) => {
     const valorLiquido = Number((valorBruto - valorTaxa).toFixed(2));
 
     // 4. Chamada para EvoPay
-    const evopayToken = process.env.EVOPAY_TOKEN;
+    // O .trim() remove espaços em branco acidentais no começo ou fim do token
+    const evopayToken = process.env.EVOPAY_TOKEN ? process.env.EVOPAY_TOKEN.trim() : '';
     
     const payloadEvoPay = {
       amount: valorLiquido,
@@ -72,7 +84,7 @@ exports.handler = async (event) => {
 
     console.log('Enviando para EvoPay:', payloadEvoPay);
 
-    // CORREÇÃO AQUI: Mudança de pix.evopay.cash para api.evopay.cash
+    // URL api.evopay.cash conforme documentação
     const evopayResponse = await axios.post('https://api.evopay.cash/v1/withdraw', payloadEvoPay, {
       headers: { 
         'API-Key': evopayToken,
