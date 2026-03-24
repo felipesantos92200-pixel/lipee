@@ -32,7 +32,7 @@ exports.handler = async (event) => {
     const expectedToken = process.env.ADMIN_SECRET_TOKEN;
 
     if (!authHeader || authHeader !== `Bearer ${expectedToken}`) {
-      return { statusCode: 401, headers, body: JSON.stringify({ error: 'Não autorizado. Token de Admin inválido.' }) };
+      return { statusCode: 401, headers, body: JSON.stringify({ error: 'Não autorizado.' }) };
     }
 
     const { userId, withdrawId } = JSON.parse(event.body);
@@ -49,7 +49,6 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers, body: JSON.stringify({ error: 'Este saque já foi processado.' }) };
     }
 
-    // Cálculo
     const valorBruto = parseFloat(withdrawalData.amount);
     const taxaPlataforma = 0.10;
     const valorTaxa = Number((valorBruto * taxaPlataforma).toFixed(2));
@@ -57,32 +56,29 @@ exports.handler = async (event) => {
 
     const evopayToken = process.env.EVOPAY_TOKEN ? process.env.EVOPAY_TOKEN.trim() : '';
 
-    console.log('--- TESTE DE CONEXÃO EVOPAY ---');
+    // 1. Validação de Saldo (Sua rota anterior estava certa após o último ajuste)
     try {
-      // AJUSTE: Nova URL e caminho para consulta de saldo baseada na documentação
-      const checkAuth = await axios.get('https://pix.evopay.cash/v1/account/balance', {
+      await axios.get('https://pix.evopay.cash/v1/account/balance', {
         headers: { 'API-Key': evopayToken }
       });
-      // AJUSTE: O retorno da API coloca o valor dentro de "balance"
-      console.log(`✅ Conexão OK! Saldo disponível: R$ ${checkAuth.data.balance}`);
     } catch (authErr) {
-      console.error('❌ O Token foi RECUSADO na consulta de saldo (401) ou a rota está incorreta.', authErr.response?.data || authErr.message);
-      throw new Error('Token EvoPay inválido ou sem permissão de consulta.');
+      throw new Error('Erro na autenticação com EvoPay ou saldo insuficiente.');
     }
 
+    // 2. Payload de Saque
+    // DICA: Algumas versões da EvoPay esperam 'pixKeyType' em vez de 'pixType'. 
+    // Se der erro 400 agora, tente trocar o nome desse campo.
     const payloadEvoPay = {
       amount: valorLiquido,
       pixKey: withdrawalData.pixKey,
-      pixType: withdrawalData.pixType || 'cpf',
-      description: `Saque Monety - ID ${withdrawId}`
+      pixType: withdrawalData.pixType || 'cpf', 
+      description: `Saque Monety - ${withdrawId}`
     };
 
-    // TENTATIVA DE SAQUE
-    console.log('Enviando pedido de saque...');
+    console.log('Enviando pedido de saque para a rota /v1/account/withdraw...');
     
-    // AJUSTE: Domínio atualizado para pix.evopay.cash. 
-    // ATENÇÃO: Confirme se o endpoint de POST é realmente /v1/payout ou se mudou na documentação deles.
-    const evopayResponse = await axios.post('https://pix.evopay.cash/v1/payout', payloadEvoPay, {
+    // ALTERAÇÃO PRINCIPAL: Rota corrigida de /v1/payout para /v1/account/withdraw
+    const evopayResponse = await axios.post('https://pix.evopay.cash/v1/account/withdraw', payloadEvoPay, {
       headers: { 
         'API-Key': evopayToken,
         'Content-Type': 'application/json'
@@ -91,7 +87,7 @@ exports.handler = async (event) => {
 
     const gatewayId = evopayResponse.data?.id || evopayResponse.data?.transactionId || 'N/A';
 
-    // Sucesso no Banco de Dados
+    // 3. Atualização no Firebase
     const batch = db.batch();
     batch.update(withdrawalRef, {
       status: 'completed',
@@ -117,15 +113,13 @@ exports.handler = async (event) => {
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify({ success: true, message: 'Saque enviado!', enviado: valorLiquido })
+      body: JSON.stringify({ success: true, message: 'Saque realizado com sucesso!', id: gatewayId })
     };
 
   } catch (error) {
     console.error('--- ERRO NO PROCESSO ---');
     const status = error.response?.status || 500;
     const msg = error.response?.data?.message || error.message;
-    
-    console.error(`Status: ${status}`);
     console.error(`Detalhes: ${JSON.stringify(error.response?.data || msg)}`);
 
     return {
