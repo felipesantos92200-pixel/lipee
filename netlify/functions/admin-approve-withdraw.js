@@ -1,6 +1,7 @@
 const admin = require('firebase-admin');
 const axios = require('axios');
 
+// Inicialização segura do Firebase via variáveis de ambiente
 if (!admin.apps.length) {
   try {
     admin.initializeApp({
@@ -32,7 +33,7 @@ exports.handler = async (event) => {
     const expectedToken = process.env.ADMIN_SECRET_TOKEN;
 
     if (!authHeader || authHeader !== `Bearer ${expectedToken}`) {
-      return { statusCode: 401, headers, body: JSON.stringify({ error: 'Não autorizado. Token de Admin inválido.' }) };
+      return { statusCode: 401, headers, body: JSON.stringify({ error: 'Não autorizado.' }) };
     }
 
     const { userId, withdrawId } = JSON.parse(event.body);
@@ -49,7 +50,7 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers, body: JSON.stringify({ error: 'Este saque já foi processado.' }) };
     }
 
-    // Cálculo
+    // Cálculo de valores
     const valorBruto = parseFloat(withdrawalData.amount);
     const taxaPlataforma = 0.10;
     const valorTaxa = Number((valorBruto * taxaPlataforma).toFixed(2));
@@ -57,26 +58,32 @@ exports.handler = async (event) => {
 
     const evopayToken = process.env.EVOPAY_TOKEN ? process.env.EVOPAY_TOKEN.trim() : '';
 
-    console.log('--- TESTE DE CONEXÃO EVOPAY ---');
-    try {
-      const checkAuth = await axios.get('https://pix.evopay.cash/v1/account/balance', {
-        headers: { 'API-Key': evopayToken }
-      });
-      console.log(`✅ Conexão OK! Saldo disponível: R$ ${checkAuth.data.balance}`);
-    } catch (authErr) {
-      console.error('❌ O Token foi RECUSADO na consulta de saldo (401).');
-      throw new Error('Token EvoPay inválido ou sem permissão de consulta.');
+    // 1. Verificação de Saldo (Sempre bom garantir)
+    console.log('--- VALIDANDO SALDO ANTES DO SAQUE ---');
+    const checkBalance = await axios.get('https://pix.evopay.cash/v1/account/balance', {
+      headers: { 'API-Key': evopayToken }
+    });
+    
+    if (checkBalance.data.balance < valorLiquido) {
+      return { 
+        statusCode: 400, 
+        headers, 
+        body: JSON.stringify({ error: `Saldo insuficiente na EvoPay. Saldo: ${checkBalance.data.balance}` }) 
+      };
     }
 
+    // 2. Payload de Saque
     const payloadEvoPay = {
       amount: valorLiquido,
       pixKey: withdrawalData.pixKey,
-      pixType: withdrawalData.pixType || 'cpf',
-      description: `Saque Monety - ID ${withdrawId}`
+      pixType: withdrawalData.pixType || 'cpf', // Se der erro 400, tente mudar para 'pixKeyType'
+      description: `Saque ID ${withdrawId}`
     };
 
-    console.log('Tentando rota de saque: /v1/pix/payout...');
-    const evopayResponse = await axios.post('https://pix.evopay.cash/v1/pix/payout', payloadEvoPay, {
+    console.log('Tentando rota de saque: https://pix.evopay.cash/v1/withdraw');
+
+    // TENTATIVA: Usando a primeira URL sugerida
+    const evopayResponse = await axios.post('https://pix.evopay.cash/v1/withdraw', payloadEvoPay, {
       headers: { 
         'API-Key': evopayToken,
         'Content-Type': 'application/json'
@@ -85,7 +92,7 @@ exports.handler = async (event) => {
 
     const gatewayId = evopayResponse.data?.id || evopayResponse.data?.transactionId || 'N/A';
 
-    // Sucesso no Banco de Dados
+    // 3. Sucesso: Atualiza Firebase
     const batch = db.batch();
     batch.update(withdrawalRef, {
       status: 'completed',
@@ -102,7 +109,7 @@ exports.handler = async (event) => {
       netAmount: valorLiquido,
       fee: valorTaxa,
       status: 'completed',
-      description: `Saque PIX Aprovado`,
+      description: `Saque PIX Enviado`,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
@@ -111,21 +118,21 @@ exports.handler = async (event) => {
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify({ success: true, message: 'Saque enviado!', enviado: valorLiquido })
+      body: JSON.stringify({ success: true, message: 'Saque processado!', id: gatewayId })
     };
 
   } catch (error) {
-    console.error('--- ERRO NO PROCESSO ---');
+    console.error('--- ERRO NA OPERAÇÃO ---');
     const status = error.response?.status || 500;
-    const msg = error.response?.data?.message || error.message;
+    const errorMsg = error.response?.data?.message || error.response?.data?.error || error.message;
     
     console.error(`Status: ${status}`);
-    console.error(`Detalhes: ${JSON.stringify(error.response?.data || msg)}`);
+    console.error(`Detalhes: ${JSON.stringify(error.response?.data || errorMsg)}`);
 
     return {
       statusCode: status,
       headers,
-      body: JSON.stringify({ success: false, error: msg })
+      body: JSON.stringify({ success: false, error: errorMsg })
     };
   }
 };
