@@ -50,39 +50,48 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers, body: JSON.stringify({ error: 'Documento inválido.' }) };
     }
     
-    // Validar valor mínimo
-    if (parseFloat(amount) < 1) {
+    // Validar e formatar valor (Garante que seja um número com max 2 casas decimais)
+    const amountFloat = Number(parseFloat(amount).toFixed(2));
+    if (amountFloat < 1) {
       return { statusCode: 400, headers, body: JSON.stringify({ error: 'O valor mínimo é R$ 1,00' }) };
     }
 
-    let cleanName = (userName || "Cliente").replace(/[^a-zA-Z ]/g, "").trim();
+    let cleanName = (userName || "Cliente").replace(/[^a-zA-Z áàâãéèêíïóôõöúçñÁÀÂÃÉÈÊÍÏÓÔÕÖÚÇÑ]/g, "").trim();
     if (!cleanName) cleanName = "Cliente";
 
     const evopayToken = process.env.EVOPAY_TOKEN;
-    if (!evopayToken) throw new Error("Token EVOPAY_TOKEN não configurado.");
+    if (!evopayToken) throw new Error("Token EVOPAY_TOKEN não configurado no ambiente da Netlify.");
 
-    const SITE_URL = process.env.URL || 'http://localhost:8888';
-    const callbackUrl = `${SITE_URL}/.netlify/functions/webhook-payment`;
+    // Configuração robusta da URL base para o Webhook na Netlify
+    const SITE_URL = process.env.URL || process.env.DEPLOY_URL || 'http://localhost:8888';
+    const baseUrl = SITE_URL.endsWith('/') ? SITE_URL.slice(0, -1) : SITE_URL;
+    const callbackUrl = `${baseUrl}/.netlify/functions/webhook-payment`;
 
     // 2. GERAR O ID DO DEPÓSITO ANTECIPADAMENTE
     const depositRef = db.collection('deposits').doc();
     const transactionId = depositRef.id;
 
-    // 3. Chamada à EvoPay enviando o 'reference'
-    const response = await axios.post('https://pix.evopay.cash/v1/pix', {
-      amount: parseFloat(amount),
+    // 3. Preparar o Payload para a EvoPay
+    const evoPayPayload = {
+      amount: amountFloat,
       callbackUrl: callbackUrl,
       payerName: cleanName,
       payerDocument: cleanDocument,
       reference: transactionId 
-    }, {
+    };
+
+    // LOG IMPORTANTE: Verifique isso no painel da Netlify se der erro novamente
+    console.log('=== PAYLOAD ENVIADO PARA EVOPAY ===', JSON.stringify(evoPayPayload));
+
+    // 4. Chamada à EvoPay
+    const response = await axios.post('https://pix.evopay.cash/v1/pix', evoPayPayload, {
       headers: { 
         'API-Key': evopayToken, 
         'Content-Type': 'application/json' 
       }
     });
 
-    // 4. Extração do Código PIX
+    // 5. Extração do Código PIX
     const paymentData = response.data;
     const brCode = 
       paymentData?.qrCodeText || 
@@ -96,12 +105,11 @@ exports.handler = async (event) => {
       throw new Error("Código PIX não retornado pela EvoPay.");
     }
 
-    // 5. Link da Imagem QR Code
+    // 6. Link da Imagem QR Code
     const qrImage = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(brCode)}`;
 
-    // 6. Preparar dados para o Firestore
+    // 7. Preparar dados para o Firestore
     const timestamp = admin.firestore.FieldValue.serverTimestamp();
-    const amountFloat = parseFloat(amount);
 
     // Salvar na Coleção Global de Depósitos
     const globalDepositPromise = depositRef.set({
@@ -130,7 +138,7 @@ exports.handler = async (event) => {
     // Executar ambas as gravações ao mesmo tempo para ser mais rápido
     await Promise.all([globalDepositPromise, userTransactionPromise]);
 
-    // 7. Retorno Unificado para o Frontend
+    // 8. Retorno Unificado para o Frontend
     return {
       statusCode: 200,
       headers,
@@ -139,19 +147,23 @@ exports.handler = async (event) => {
         pixCode: brCode,
         qrImage: qrImage,
         transactionId: transactionId,
-        pix_code: brCode, // mantido para compatibilidade com frontends mais antigos
+        pix_code: brCode,
         qr_image: qrImage 
       })
     };
 
   } catch (error) {
-    console.error("Erro na Function create-payment:", error.response?.data || error.message);
+    // Log melhorado para capturar a resposta exata da EvoPay
+    const errorDetails = error.response?.data || error.message;
+    console.error("=== ERRO NA CRIAÇÃO DO PIX ===", JSON.stringify(errorDetails));
+    
     return {
       statusCode: error.response?.status || 500,
       headers,
       body: JSON.stringify({ 
         success: false, 
-        error: error.response?.data?.message || error.message || 'Falha ao processar pagamento' 
+        error: error.response?.data?.message || 'Falha ao processar pagamento com a EvoPay',
+        details: errorDetails
       })
     };
   }
